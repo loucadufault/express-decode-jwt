@@ -1,34 +1,52 @@
 import * as jwt from 'jsonwebtoken';
 import * as express from 'express';
-import { unless } from 'express-unless';
 import { set } from './util/set';
+import { decode } from 'jws';
 
 import { UnauthorizedError } from './errors/UnauthorizedError';
 
-/**
- * A function that defines how to retrieve the verification key given the express request and the JWT.
- */
-export type GetVerificationKey = (req: express.Request, token: jwt.Jwt | undefined) => jwt.Secret | undefined | Promise<jwt.Secret | undefined>;
 
 /**
- * @deprecated use GetVerificationKey
+ * Returns the decoded payload without verifying if the signature is valid.
+ * token - JWT string to decode
+ * [options] - Options for decoding
+ * returns - The decoded Token
+ * 
+ * @see https://github.com/auth0/node-jsonwebtoken/blob/master/decode.js
+ * Implementation is copied from there, to minimize package size.
+ * We add typings and modern language features.
  */
-export type SecretCallback = GetVerificationKey;
+function jwtDecode(token: string, options: jwt.DecodeOptions = {}) {
+  // jws.decode API typings are inaccurate
+  // @ts-ignore-next-line
+  const decoded = decode(token, options);
+  if (!decoded) { return null; }
+  let payload = decoded.payload;
 
-/**
- * @deprecated use GetVerificationKey
- */
-export type SecretCallbackLong = GetVerificationKey;
+  //try parse the payload
+  if (typeof payload === 'string') {
+    try {
+      const obj = JSON.parse(payload);
+      if(obj !== null && typeof obj === 'object') {
+        payload = obj;
+      }
+    } catch (e) 
+    // eslint-disable-next-line no-empty
+    { }
+  }
 
-/**
- * A function to check if a token is revoked
- */
-export type IsRevoked = (req: express.Request, token: jwt.Jwt | undefined) => boolean | Promise<boolean>;
-
-/**
- * A function to check if a token is revoked
- */
-export type ExpirationHandler = (req: express.Request, err: UnauthorizedError) => void | Promise<void>;
+  //return header if `complete` option is enabled.  header includes claims
+  //such as `kid` and `alg` used to select the key within a JWKS needed to
+  //verify the signature
+  if (options.complete === true) {
+    return {
+      header: decoded.header,
+      payload: payload,
+      signature: decoded.signature
+    };
+  }
+  return payload;
+}
 
 /**
  * A function to customize how a token is retrieved from the express request.
@@ -37,19 +55,9 @@ export type TokenGetter = (req: express.Request) => string | Promise<string> | u
 
 export type Params = {
   /**
-   * The Key or a function to retrieve the key used to verify the JWT.
-   */
-  secret: jwt.Secret | GetVerificationKey,
-
-  /**
    * Defines how to retrieves the token from the request object.
    */
   getToken?: TokenGetter,
-
-  /**
-   * Defines how to verify if a token is revoked.
-   */
-  isRevoked?: IsRevoked,
 
   /**
    * If sets to true, continue to the next middleware when the
@@ -65,17 +73,7 @@ export type Params = {
    * @default 'auth'
    */
   requestProperty?: string,
-
-  /**
-   * List of JWT algorithms allowed.
-   */
-  algorithms: jwt.Algorithm[],
-
-  /**
-   * Handle expired tokens.
-   */
-  onExpired?: ExpirationHandler,
-} & jwt.VerifyOptions;
+};
 
 export { UnauthorizedError } from './errors/UnauthorizedError';
 
@@ -98,21 +96,15 @@ export type Request<T = jwt.JwtPayload> =
   express.Request & { auth?: T };
 
 /**
- * Returns an express middleware to verify JWTs.
+ * Returns an express middleware to decode JWTs.
  *
  * @param options {Params}
- * @returns
+ * @returns the express middleware function
+ * 
+ * @see https://github.com/auth0/express-jwt
+ * The implementation is largely copied from there, less the logic to verify if the signature is valid based on secret.
  */
-export const expressjwt = (options: Params) => {
-  if (!options?.secret) throw new RangeError('express-jwt: `secret` is a required option');
-  if (!options.algorithms) throw new RangeError('express-jwt: `algorithms` is a required option');
-  if (!Array.isArray(options.algorithms)) throw new RangeError('express-jwt: `algorithms` must be an array');
-
-  const getVerificationKey: GetVerificationKey =
-    typeof options.secret === 'function' ?
-      options.secret :
-      async () => options.secret as jwt.Secret;
-
+export const expressdecodejwt = (options: Params = {}) => {
   const credentialsRequired = typeof options.credentialsRequired === 'undefined' ? true : options.credentialsRequired;
   const requestProperty = typeof options.requestProperty === 'string' ? options.requestProperty : 'auth';
 
@@ -162,28 +154,15 @@ export const expressjwt = (options: Params) => {
 
       let decodedToken: jwt.Jwt;
 
+      console.log(token);
       try {
-        decodedToken = jwt.decode(token, { complete: true });
+        decodedToken = jwtDecode(token, { complete: true });
       } catch (err) {
         throw new UnauthorizedError('invalid_token', err);
       }
 
-      const key = await getVerificationKey(req, decodedToken);
-
-      try {
-        jwt.verify(token, key, options);
-      } catch (err) {
-        const wrappedErr = new UnauthorizedError('invalid_token', err);
-        if (err instanceof jwt.TokenExpiredError && typeof options.onExpired === 'function') {
-          await options.onExpired(req, wrappedErr);
-        } else {
-          throw wrappedErr;
-        }
-      }
-
-      const isRevoked = options.isRevoked && await options.isRevoked(req, decodedToken) || false;
-      if (isRevoked) {
-        throw new UnauthorizedError('revoked_token', { message: 'The token has been revoked.' });
+      if (decodedToken === null) {
+        throw new UnauthorizedError('invalid_token', { message: 'Could not decode JWT' });
       }
 
       const request = req as Request<jwt.JwtPayload | string>;
@@ -194,9 +173,5 @@ export const expressjwt = (options: Params) => {
     }
   };
 
-  middleware.unless = unless;
-
   return middleware;
 }
-
-

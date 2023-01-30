@@ -1,6 +1,6 @@
 import * as jwt from 'jsonwebtoken';
 import * as express from 'express';
-import { expressjwt, ExpressJwtRequest } from '../src';
+import { expressdecodejwt, ExpressJwtRequest } from '../src';
 import * as assert from 'assert';
 
 
@@ -14,7 +14,7 @@ describe('string tokens', function () {
 
     req.headers = {};
     req.headers.authorization = 'Bearer ' + token;
-    expressjwt({ secret: secret, algorithms: ['HS256'] })(req, res, function () {
+    expressdecodejwt()(req, res, function () {
       assert.equal(req.auth, 'foo');
       done();
     });
